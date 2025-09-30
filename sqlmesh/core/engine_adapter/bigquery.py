@@ -169,17 +169,18 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin):
         )
 
         def query_factory() -> Query:
-            if bigframes_pd and isinstance(df, bigframes_pd.DataFrame):
-                df.to_gbq(
+            ordered_df = df[list(source_columns_to_types)]
+            if bigframes_pd and isinstance(ordered_df, bigframes_pd.DataFrame):
+                ordered_df.to_gbq(
                     f"{temp_bq_table.project}.{temp_bq_table.dataset_id}.{temp_bq_table.table_id}",
                     if_exists="replace",
                 )
             elif not self.table_exists(temp_table):
                 # Make mypy happy
-                assert isinstance(df, pd.DataFrame)
+                assert isinstance(ordered_df, pd.DataFrame)
                 self._db_call(self.client.create_table, table=temp_bq_table, exists_ok=False)
                 result = self.__load_pandas_to_table(
-                    temp_bq_table, df, source_columns_to_types, replace=False
+                    temp_bq_table, ordered_df, source_columns_to_types, replace=False
                 )
                 if result.errors:
                     raise SQLMeshError(result.errors)
@@ -753,6 +754,28 @@ class BigQueryEngineAdapter(ClusteredByMixin, RowDiffMixin):
             return True
         except NotFound:
             return False
+
+    def get_table_last_modified_ts(self, table_names: t.List[TableName]) -> t.List[int]:
+        from sqlmesh.utils.date import to_timestamp
+
+        datasets_to_tables: t.DefaultDict[str, t.List[str]] = defaultdict(list)
+        for table_name in table_names:
+            table = exp.to_table(table_name)
+            datasets_to_tables[table.db].append(table.name)
+
+        results = []
+
+        for dataset, tables in datasets_to_tables.items():
+            query = (
+                f"SELECT TIMESTAMP_MILLIS(last_modified_time) FROM `{dataset}.__TABLES__` WHERE "
+            )
+            for i, table_name in enumerate(tables):
+                query += f"TABLE_ID = '{table_name}'"
+                if i < len(tables) - 1:
+                    query += " OR "
+            results.extend(self.fetchall(query))
+
+        return [to_timestamp(row[0]) for row in results]
 
     def _get_table(self, table_name: TableName) -> BigQueryTable:
         """
